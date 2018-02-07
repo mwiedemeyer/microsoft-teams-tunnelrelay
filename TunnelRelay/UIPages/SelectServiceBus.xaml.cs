@@ -64,6 +64,11 @@ namespace TunnelRelay
         private AuthenticationResult authResult;
 
         /// <summary>
+        /// List of Azure Tenants.
+        /// </summary>
+        private ObservableCollection<RM.Models.TenantIdDescription> tenants = new ObservableCollection<RM.Models.TenantIdDescription>();
+
+        /// <summary>
         /// List of Azure subscription.
         /// </summary>
         private ObservableCollection<RM.Models.SubscriptionInner> subscriptions = new ObservableCollection<RM.Models.SubscriptionInner>();
@@ -82,10 +87,12 @@ namespace TunnelRelay
             this.ContentRendered += this.Window_ContentRendered;
             this.InitializeComponent();
             this.authResult = authResult;
+            this.comboTenantList.ItemsSource = this.tenants;
             this.comboSubscriptionList.ItemsSource = this.subscriptions;
             this.comboServiceBusList.ItemsSource = this.serviceBuses;
 
             // Disable controls to begin with.
+            this.comboTenantList.IsEnabled = false;
             this.comboSubscriptionList.IsEnabled = false;
             this.comboServiceBusList.IsEnabled = false;
         }
@@ -99,21 +106,73 @@ namespace TunnelRelay
         {
             this.progressBar.Visibility = Visibility.Visible;
 
-            Thread subscriptionThread = new Thread(new ThreadStart(() =>
+            Thread tenantThread = new Thread(new ThreadStart(() =>
             {
                 try
                 {
                     TokenCredentials tokenCredentials = new TokenCredentials(this.authResult.AccessToken);
                     RM.SubscriptionClient subsClient = new RM.SubscriptionClient(tokenCredentials);
 
+                    List<RM.Models.TenantIdDescription> tenantList = new List<RM.Models.TenantIdDescription>();
+
+                    var resp = subsClient.Tenants.ListAsync().Result;
+                    tenantList.AddRange(resp);
+
+                    while (!string.IsNullOrEmpty(resp.NextPageLink))
+                    {
+                        resp = subsClient.Tenants.ListNextAsync(resp.NextPageLink).Result;
+                        tenantList.AddRange(resp);
+                    }
+
+                    this.Dispatcher.Invoke(() =>
+                    {
+                        this.tenants.Clear();
+                        tenantList.ForEach(ten => this.tenants.Add(ten));
+                        this.comboTenantList.IsEnabled = true;
+                        this.progressBar.Visibility = Visibility.Hidden;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(CallInfo.Site(), ex, "Failed to get user tenants");
+
+                    this.Dispatcher.Invoke(() => MessageBox.Show("Failed to get list of tenants!! Exiting", "Azure Error", MessageBoxButton.OKCancel, MessageBoxImage.Error));
+                    Application.Current.Shutdown();
+                }
+            }));
+
+            tenantThread.Start();
+        }
+
+        /// <summary>
+        /// Handles the SelectionChanged event of the TenantList control.
+        /// </summary>
+        /// <param name="sender">The source of the event.</param>
+        /// <param name="e">The <see cref="SelectionChangedEventArgs"/> instance containing the event data.</param>
+        private void TenantList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            this.btnDone.IsEnabled = false;
+
+            this.progressBar.Visibility = Visibility.Visible;
+            var selectedTenant = (sender as ComboBox).SelectedItem as RM.Models.TenantIdDescription;
+
+            Thread subscriptionThread = new Thread(new ThreadStart(() =>
+            {
+                try
+                {
+                    StringTokenProvider tokenProvider = new StringTokenProvider(this.authResult.AccessToken, this.authResult.AccessTokenType);
+                    TokenCredentials tokenCredentials = new TokenCredentials(tokenProvider, selectedTenant.TenantId, this.authResult.UserInfo.DisplayableId);
+
+                    RM.SubscriptionClient subsClient = new RM.SubscriptionClient(tokenCredentials);
+
                     List<RM.Models.SubscriptionInner> subscriptionList = new List<RM.Models.SubscriptionInner>();
 
-                    var resp = subsClient.Subscriptions.List();
+                    var resp = subsClient.Subscriptions.ListAsync().Result;
                     subscriptionList.AddRange(resp);
 
                     while (!string.IsNullOrEmpty(resp.NextPageLink))
                     {
-                        resp = subsClient.Subscriptions.ListNext(resp.NextPageLink);
+                        resp = subsClient.Subscriptions.ListNextAsync(resp.NextPageLink).Result;
                         subscriptionList.AddRange(resp);
                     }
 
@@ -159,12 +218,12 @@ namespace TunnelRelay
                     serviceBusManagementClient.SubscriptionId = selectedSubscription.SubscriptionId;
 
                     List<NamespaceModelInner> serviceBusList = new List<NamespaceModelInner>();
-                    var resp = serviceBusManagementClient.Namespaces.List();
+                    var resp = serviceBusManagementClient.Namespaces.ListAsync().Result;
                     serviceBusList.AddRange(resp);
 
                     while (!string.IsNullOrEmpty(resp.NextPageLink))
                     {
-                        resp = serviceBusManagementClient.Namespaces.ListNext(resp.NextPageLink);
+                        resp = serviceBusManagementClient.Namespaces.ListNextAsync(resp.NextPageLink).Result;
                         serviceBusList.AddRange(resp);
                     }
 
@@ -248,12 +307,12 @@ namespace TunnelRelay
             {
                 try
                 {
-                    var resp = serviceBusManagementClient.Namespaces.ListAuthorizationRules(rgName, selectedServiceBus.Name);
+                    var resp = serviceBusManagementClient.Namespaces.ListAuthorizationRulesAsync(rgName, selectedServiceBus.Name).Result;
                     serviceBusList.AddRange(resp);
 
                     while (!string.IsNullOrEmpty(resp.NextPageLink))
                     {
-                        resp = serviceBusManagementClient.Namespaces.ListAuthorizationRulesNext(resp.NextPageLink);
+                        resp = serviceBusManagementClient.Namespaces.ListAuthorizationRulesNextAsync(resp.NextPageLink).Result;
                         serviceBusList.AddRange(resp);
                     }
 
@@ -271,10 +330,10 @@ namespace TunnelRelay
                     }
                     else
                     {
-                        serviceBusManagementClient.Namespaces.ListKeys(rgName, selectedServiceBus.Name, selectedAuthRule.Name);
+                        ResourceListKeysInner keysList = serviceBusManagementClient.Namespaces.ListKeysAsync(rgName, selectedServiceBus.Name, selectedAuthRule.Name).Result;
 
-                        ApplicationData.Instance.ServiceBusSharedKey = serviceBusManagementClient.Namespaces.ListKeys(rgName, selectedServiceBus.Name, selectedAuthRule.Name).PrimaryKey;
-                        ApplicationData.Instance.ServiceBusKeyName = serviceBusManagementClient.Namespaces.ListKeys(rgName, selectedServiceBus.Name, selectedAuthRule.Name).KeyName;
+                        ApplicationData.Instance.ServiceBusSharedKey = keysList.PrimaryKey;
+                        ApplicationData.Instance.ServiceBusKeyName = keysList.KeyName;
                         ApplicationData.Instance.ServiceBusUrl = selectedServiceBus.ServiceBusEndpoint;
 
                         this.Dispatcher.Invoke(() =>
@@ -305,18 +364,18 @@ namespace TunnelRelay
 
                     try
                     {
-                        resourceGroup = resourceManagementClient.ResourceGroups.Get("TunnelRelay");
+                        resourceGroup = resourceManagementClient.ResourceGroups.GetAsync("TunnelRelay").Result;
                     }
                     catch (Microsoft.Rest.Azure.CloudException httpEx)
                     {
                         if (httpEx.Response.StatusCode == System.Net.HttpStatusCode.NotFound)
                         {
-                            resourceGroup = resourceManagementClient.ResourceGroups.CreateOrUpdate("TunnelRelay", new RM.Models.ResourceGroupInner
+                            resourceGroup = resourceManagementClient.ResourceGroups.CreateOrUpdateAsync("TunnelRelay", new RM.Models.ResourceGroupInner
                             {
                                 Location = "WestUS",
                                 Name = "TunnelRelay",
                                 Tags = newServiceBus.Tags,
-                            });
+                            }).Result;
                         }
                     }
 
@@ -344,19 +403,19 @@ namespace TunnelRelay
                         return;
                     }
 
-                    selectedServiceBus = serviceBusManagementClient.Namespaces.CreateOrUpdate(rgName, newBusName, new NamespaceModelInner
+                    selectedServiceBus = serviceBusManagementClient.Namespaces.CreateOrUpdateAsync(rgName, newBusName, new NamespaceModelInner
                     {
                         Location = selectedServiceBus.Location,
                         Sku = selectedServiceBus.Sku,
                         Tags = selectedServiceBus.Tags,
-                    });
+                    }).Result;
 
-                    var resp = serviceBusManagementClient.Namespaces.ListAuthorizationRules(rgName, selectedServiceBus.Name);
+                    var resp = serviceBusManagementClient.Namespaces.ListAuthorizationRulesAsync(rgName, selectedServiceBus.Name).Result;
                     serviceBusList.AddRange(resp);
 
                     while (!string.IsNullOrEmpty(resp.NextPageLink))
                     {
-                        resp = serviceBusManagementClient.Namespaces.ListAuthorizationRulesNext(resp.NextPageLink);
+                        resp = serviceBusManagementClient.Namespaces.ListAuthorizationRulesNextAsync(resp.NextPageLink).Result;
                         serviceBusList.AddRange(resp);
                     }
 
@@ -374,8 +433,8 @@ namespace TunnelRelay
                     }
                     else
                     {
-                        ApplicationData.Instance.ServiceBusSharedKey = serviceBusManagementClient.Namespaces.ListKeys(rgName, selectedServiceBus.Name, selectedAuthRule.Name).PrimaryKey;
-                        ApplicationData.Instance.ServiceBusKeyName = serviceBusManagementClient.Namespaces.ListKeys(rgName, selectedServiceBus.Name, selectedAuthRule.Name).KeyName;
+                        ApplicationData.Instance.ServiceBusSharedKey = serviceBusManagementClient.Namespaces.ListKeysAsync(rgName, selectedServiceBus.Name, selectedAuthRule.Name).Result.PrimaryKey;
+                        ApplicationData.Instance.ServiceBusKeyName = serviceBusManagementClient.Namespaces.ListKeysAsync(rgName, selectedServiceBus.Name, selectedAuthRule.Name).Result.KeyName;
                         ApplicationData.Instance.ServiceBusUrl = selectedServiceBus.ServiceBusEndpoint;
 
                         this.Dispatcher.Invoke(() =>
